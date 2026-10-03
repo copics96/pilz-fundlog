@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pilz-Fundlog</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#2f6f3e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fundlog">
+<style>
+  :root { --bg:#fff; --fg:#1b1b1b; --muted:#666; --card:#f3f3f0; --line:#d6d6d0; --acc:#2f6f3e; --accfg:#fff; --bad:#a33; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121212; --fg:#eee; --muted:#9a9a9a; --card:#1e1e1e; --line:#333; --acc:#4c9a5e; --accfg:#06140a; --bad:#e07070; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:16px; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui, sans-serif; max-width:560px; margin-inline:auto; }
+  h1 { font-size:1.3rem; margin:0 0 12px; }
+  label { display:block; margin:12px 0 4px; font-weight:600; }
+  input, select, textarea { width:100%; padding:12px; font-size:1rem; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  button { padding:14px; font-size:1rem; border:0; border-radius:8px; background:var(--acc); color:var(--accfg); font-weight:600; width:100%; margin-top:12px; }
+  button.sec { background:var(--card); color:var(--fg); border:1px solid var(--line); }
+  button.small { width:auto; padding:6px 10px; margin:0; font-size:.85rem; background:transparent; color:var(--bad); border:1px solid var(--line); }
+  .choice { display:flex; gap:8px; }
+  .choice label { flex:1; margin:0; font-weight:400; }
+  .choice input { display:none; }
+  .choice span { display:block; text-align:center; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--card); }
+  .choice input:checked + span { background:var(--acc); color:var(--accfg); font-weight:600; }
+  .msg { margin-top:8px; font-size:.9rem; color:var(--muted); min-height:1.2em; }
+  .entry { border-top:1px solid var(--line); padding:10px 0; display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
+  .entry small { color:var(--muted); display:block; }
+  h2 { font-size:1.05rem; margin:24px 0 4px; }
+  textarea.out { height:90px; font-family:monospace; font-size:.8rem; display:none; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>Pilz-Fundlog</h1>
+
+<label for="datum">Datum</label>
+<input id="datum" type="date">
+
+<label>Standort</label>
+<div class="row">
+  <input id="lat" inputmode="decimal" placeholder="Breite 48.7011">
+  <input id="lon" inputmode="decimal" placeholder="Länge 8.5967">
+</div>
+<button class="sec" id="gps" type="button">GPS-Position holen</button>
+<div class="msg" id="gpsmsg"></div>
+
+<label for="art">Gesuchte Art</label>
+<select id="art">
+  <option value="steinpilz">Steinpilz</option>
+  <option value="pfifferling">Pfifferling</option>
+  <option value="maronenroehrling">Maronenröhrling</option>
+  <option value="champignon">Wiesenchampignon</option>
+  <option value="rotkappe">Rotkappe/Birkenpilz</option>
+  <option value="semmelstoppelpilz">Semmelstoppelpilz</option>
+  <option value="herbsttrompete">Herbsttrompete</option>
+  <option value="parasol">Parasol</option>
+  <option value="hallimasch">Hallimasch</option>
+</select>
+
+<label>Ergebnis</label>
+<div class="choice">
+  <label><input type="radio" name="fund" value="ja" checked><span>Fund</span></label>
+  <label><input type="radio" name="fund" value="nein"><span>Kein Fund</span></label>
+</div>
+
+<label for="menge">Menge (optional)</label>
+<input id="menge" placeholder="z. B. 5 Stück">
+
+<label for="notiz">Notiz (optional)</label>
+<input id="notiz" placeholder="z. B. Fichtenwald, Nordhang">
+
+<button id="save" type="button">Eintrag speichern</button>
+<div class="msg" id="msg"></div>
+
+<h2>Einträge (<span id="count">0</span>)</h2>
+<div id="list"></div>
+
+<button class="sec" id="dl" type="button">CSV herunterladen</button>
+<button class="sec" id="copy" type="button">CSV kopieren</button>
+<textarea class="out" id="out" readonly></textarea>
+<div class="msg">Die Einträge liegen nur in diesem Browser auf diesem Handy. Lade die CSV regelmäßig herunter, sonst gehen sie bei gelöschten Browserdaten verloren.</div>
+
+<script>
+const KEY = "pilz_eintraege_v1";
+const $ = id => document.getElementById(id);
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { return []; }
+}
+function store(arr) {
+  try { localStorage.setItem(KEY, JSON.stringify(arr)); return true; } catch (e) { return false; }
+}
+function today() {
+  const t = new Date();
+  return t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") + "-" + String(t.getDate()).padStart(2, "0");
+}
+function num(v) {
+  const n = parseFloat(String(v).trim().replace(",", "."));
+  return isNaN(n) ? null : n;
+}
+function esc(v) {
+  v = String(v == null ? "" : v);
+  return /[",\n;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+}
+function toCsv(arr) {
+  const lines = ["datum,lat,lon,art,fund,menge,notiz"];
+  arr.forEach(e => lines.push([e.datum, e.lat, e.lon, e.art, e.fund, e.menge, e.notiz].map(esc).join(",")));
+  return lines.join("\n") + "\n";
+}
+function render() {
+  const arr = load();
+  $("count").textContent = arr.length;
+  $("list").innerHTML = "";
+  arr.slice().reverse().forEach((e, i) => {
+    const idx = arr.length - 1 - i;
+    const div = document.createElement("div");
+    div.className = "entry";
+    const info = document.createElement("div");
+    const art = $("art").querySelector('option[value="' + e.art + '"]');
+    info.textContent = e.datum + " – " + (art ? art.textContent : e.art) + " – " + (e.fund === "ja" ? "Fund" : "kein Fund");
+    const sm = document.createElement("small");
+    sm.textContent = e.lat + ", " + e.lon + (e.menge ? " · " + e.menge : "") + (e.notiz ? " · " + e.notiz : "");
+    info.appendChild(sm);
+    const b = document.createElement("button");
+    b.className = "small"; b.textContent = "Löschen";
+    b.onclick = () => {
+      if (confirm("Eintrag löschen?")) { const a = load(); a.splice(idx, 1); store(a); render(); }
+    };
+    div.appendChild(info); div.appendChild(b);
+    $("list").appendChild(div);
+  });
+}
+
+$("datum").value = today();
+
+// Koordinaten aus Karten-App einfügen ("48.7011, 8.5967" in das erste Feld)
+$("lat").addEventListener("input", () => {
+  const m = $("lat").value.match(/^\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*$/);
+  if (m) { $("lat").value = m[1]; $("lon").value = m[2]; }
+});
+
+$("gps").onclick = () => {
+  const msg = $("gpsmsg");
+  if (!navigator.geolocation) { msg.textContent = "GPS nicht verfügbar. Koordinaten aus der Karten-App einfügen."; return; }
+  msg.textContent = "Suche Position …";
+  navigator.geolocation.getCurrentPosition(
+    p => {
+      $("lat").value = p.coords.latitude.toFixed(4);
+      $("lon").value = p.coords.longitude.toFixed(4);
+      msg.textContent = "Position übernommen (Genauigkeit ca. " + Math.round(p.coords.accuracy) + " m).";
+    },
+    () => { msg.textContent = "GPS nicht verfügbar oder nicht erlaubt. Koordinaten aus der Karten-App einfügen."; },
+    { enableHighAccuracy: true, timeout: 20000 }
+  );
+};
+
+$("save").onclick = () => {
+  const lat = num($("lat").value), lon = num($("lon").value);
+  if (lat === null || lon === null) { $("msg").textContent = "Bitte Standort angeben."; return; }
+  if (!$("datum").value) { $("msg").textContent = "Bitte Datum angeben."; return; }
+  const e = {
+    datum: $("datum").value,
+    lat: lat.toFixed(4), lon: lon.toFixed(4),
+    art: $("art").value,
+    fund: document.querySelector('input[name="fund"]:checked').value,
+    menge: $("menge").value.trim(),
+    notiz: $("notiz").value.trim()
+  };
+  const arr = load(); arr.push(e);
+  if (store(arr)) {
+    $("msg").textContent = "Gespeichert.";
+    $("menge").value = ""; $("notiz").value = "";
+    render();
+  } else {
+    $("msg").textContent = "Speichern im Browser nicht möglich. Bitte CSV kopieren und woanders sichern.";
+  }
+};
+
+$("dl").onclick = () => {
+  const blob = new Blob([toCsv(load())], { type: "text/csv" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "fundlog.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+};
+
+$("copy").onclick = () => {
+  const out = $("out");
+  out.value = toCsv(load());
+  out.style.display = "block";
+  out.select();
+  try { document.execCommand("copy"); } catch (e) {}
+};
+
+// Offline-Zwischenspeicher und Schutz vor automatischem Loeschen (nur ueber https)
+try {
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
+} catch (e) {}
+
+render();
+</script>
+</body>
+</html>
