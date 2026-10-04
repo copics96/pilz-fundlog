@@ -25,6 +25,8 @@
   button { padding:14px; font-size:1rem; border:0; border-radius:8px; background:var(--acc); color:var(--accfg); font-weight:600; width:100%; margin-top:12px; }
   button.sec { background:var(--card); color:var(--fg); border:1px solid var(--line); }
   button.small { width:auto; padding:6px 10px; margin:0; font-size:.85rem; background:transparent; color:var(--bad); border:1px solid var(--line); }
+  button.small.edit { color:var(--fg); }
+  .btns { display:flex; gap:6px; flex-shrink:0; }
   .choice { display:flex; gap:8px; }
   .choice label { flex:1; margin:0; font-weight:400; }
   .choice input { display:none; }
@@ -83,6 +85,7 @@
 <input id="notiz" placeholder="z. B. Fichtenwald, Nordhang">
 
 <button id="save" type="button">Eintrag speichern</button>
+<button class="sec" id="cancel" type="button" style="display:none">Bearbeiten abbrechen</button>
 <div class="msg" id="msg"></div>
 
 <h2>Einträge (<span id="count">0</span>)</h2>
@@ -96,6 +99,7 @@
 <script>
 const KEY = "pilz_eintraege_v1";
 const $ = id => document.getElementById(id);
+let editIdx = null;
 
 function load() {
   try { return JSON.parse(localStorage.getItem(KEY) || "[]"); } catch (e) { return []; }
@@ -120,6 +124,29 @@ function toCsv(arr) {
   arr.forEach(e => lines.push([e.datum, e.lat, e.lon, e.art, e.fund, e.menge, e.notiz].map(esc).join(",")));
   return lines.join("\n") + "\n";
 }
+function startEdit(idx) {
+  const e = load()[idx];
+  if (!e) return;
+  editIdx = idx;
+  $("datum").value = e.datum;
+  $("lat").value = e.lat;
+  $("lon").value = e.lon;
+  $("art").value = e.art;
+  const r = document.querySelector('input[name="fund"][value="' + e.fund + '"]');
+  if (r) r.checked = true;
+  $("menge").value = e.menge || "";
+  $("notiz").value = e.notiz || "";
+  $("save").textContent = "Änderung speichern";
+  $("cancel").style.display = "block";
+  $("msg").textContent = "Du bearbeitest einen gespeicherten Eintrag.";
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+function endEdit() {
+  editIdx = null;
+  $("save").textContent = "Eintrag speichern";
+  $("cancel").style.display = "none";
+}
+
 function render() {
   const arr = load();
   $("count").textContent = arr.length;
@@ -134,12 +161,18 @@ function render() {
     const sm = document.createElement("small");
     sm.textContent = e.lat + ", " + e.lon + (e.menge ? " · " + e.menge : "") + (e.notiz ? " · " + e.notiz : "");
     info.appendChild(sm);
+    const be = document.createElement("button");
+    be.className = "small edit"; be.textContent = "Bearbeiten";
+    be.onclick = () => startEdit(idx);
     const b = document.createElement("button");
     b.className = "small"; b.textContent = "Löschen";
     b.onclick = () => {
-      if (confirm("Eintrag löschen?")) { const a = load(); a.splice(idx, 1); store(a); render(); }
+      if (confirm("Eintrag löschen?")) { endEdit(); const a = load(); a.splice(idx, 1); store(a); render(); }
     };
-    div.appendChild(info); div.appendChild(b);
+    const btns = document.createElement("div");
+    btns.className = "btns";
+    btns.appendChild(be); btns.appendChild(b);
+    div.appendChild(info); div.appendChild(btns);
     $("list").appendChild(div);
   });
 }
@@ -179,14 +212,23 @@ $("save").onclick = () => {
     menge: $("menge").value.trim(),
     notiz: $("notiz").value.trim()
   };
-  const arr = load(); arr.push(e);
+  const arr = load();
+  const wasEdit = editIdx !== null && editIdx < arr.length;
+  if (wasEdit) arr[editIdx] = e; else arr.push(e);
   if (store(arr)) {
-    $("msg").textContent = "Gespeichert.";
+    $("msg").textContent = wasEdit ? "Änderung gespeichert." : "Gespeichert.";
     $("menge").value = ""; $("notiz").value = "";
+    endEdit();
     render();
   } else {
     $("msg").textContent = "Speichern im Browser nicht möglich. Bitte CSV kopieren und woanders sichern.";
   }
+};
+
+$("cancel").onclick = () => {
+  endEdit();
+  $("menge").value = ""; $("notiz").value = "";
+  $("msg").textContent = "Bearbeiten abgebrochen.";
 };
 
 $("dl").onclick = () => {
