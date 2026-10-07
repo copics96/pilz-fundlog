@@ -95,7 +95,10 @@
 <button class="sec" id="dl" type="button">CSV herunterladen</button>
 <button class="sec" id="copy" type="button">CSV kopieren</button>
 <textarea class="out" id="out" readonly></textarea>
-<div class="msg">Die Einträge liegen nur in diesem Browser auf diesem Handy. Lade die CSV regelmäßig herunter, sonst gehen sie bei gelöschten Browserdaten verloren.</div>
+<button class="sec" id="imp" type="button">CSV importieren</button>
+<input id="impfile" type="file" accept=".csv,text/csv,text/plain" multiple style="display:none">
+<div class="msg" id="impmsg"></div>
+<div class="msg">Die Einträge liegen nur in diesem Browser auf diesem Handy. Lade die CSV regelmäßig herunter, sonst gehen sie bei gelöschten Browserdaten verloren. Mit „CSV importieren“ kannst du CSV-Dateien anderer Sammler einlesen, doppelte Einträge werden übersprungen. Danach erzeugt „CSV herunterladen“ eine gemeinsame Datei.</div>
 
 <h2>Lernstand</h2>
 <div class="info" id="learn">Noch keine Daten.</div>
@@ -246,6 +249,116 @@ $("cancel").onclick = () => {
   endEdit();
   $("menge").value = ""; $("notiz").value = "";
   $("msg").textContent = "Bearbeiten abgebrochen.";
+};
+
+// ---------- CSV-Import (mehrere Dateien, Duplikate werden uebersprungen) ----------
+function parseCsv(text) {
+  text = text.replace(/^\uFEFF/, "");
+  const first = text.split(/\r?\n/, 1)[0] || "";
+  const delim = (first.match(/;/g) || []).length > (first.match(/,/g) || []).length ? ";" : ",";
+  const rows = [];
+  let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+      else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === delim) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); cell = ""; rows.push(row); row = [];
+    } else cell += c;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ""));
+}
+
+function validDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return false;
+  const d = new Date(s + "T12:00:00");
+  return !isNaN(d) && d.getFullYear() === Number(m[1]) && d.getMonth() + 1 === Number(m[2]) && d.getDate() === Number(m[3]);
+}
+
+function entryKey(e) {
+  return [e.datum, e.lat, e.lon, e.art, e.fund, e.menge || "", e.notiz || ""].join("|");
+}
+
+// Wandelt CSV-Zeilen in Eintraege um. Gibt {entries, bad:[Text,...]} oder {error} zurueck.
+function csvToEntries(rows) {
+  if (!rows.length) return { error: "Datei ist leer." };
+  const head = rows[0].map(h => h.trim().toLowerCase());
+  const idx = {};
+  head.forEach((h, i) => { if (!(h in idx)) idx[h] = i; });
+  const missing = ["datum", "lat", "lon", "art"].filter(n => !(n in idx));
+  if (missing.length) return { error: "Spalten fehlen: " + missing.join(", ") + " (erwartet: datum,lat,lon,art,fund,menge,notiz)." };
+  const out = [], bad = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    const get = n => (n in idx && r[idx[n]] != null) ? r[idx[n]].trim() : "";
+    const datum = get("datum");
+    const lat = num(get("lat")), lon = num(get("lon"));
+    const art = get("art").toLowerCase();
+    const f = get("fund").toLowerCase();
+    let why = null;
+    if (!validDate(datum)) why = "Datum ungültig";
+    else if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) why = "Standort ungültig";
+    else if (typeof SPECIES !== "undefined" && !SPECIES[art]) why = "Art unbekannt (" + art + ")";
+    else if (f !== "" && !["ja", "j", "1", "yes", "true", "nein", "n", "0", "no", "false"].includes(f)) why = "Ergebnis unklar (" + f + ")";
+    if (why) { bad.push("Zeile " + (i + 1) + ": " + why); continue; }
+    out.push({
+      datum, lat: lat.toFixed(4), lon: lon.toFixed(4), art,
+      fund: (f === "" || ["ja", "j", "1", "yes", "true"].includes(f)) ? "ja" : "nein",
+      menge: get("menge"), notiz: get("notiz")
+    });
+  }
+  return { entries: out, bad };
+}
+
+function readText(f) {
+  return f.text ? f.text() : new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsText(f);
+  });
+}
+
+async function importFiles(files) {
+  const msg = $("impmsg");
+  if (!files.length) return;
+  const arr = load();
+  const seen = new Set(arr.map(entryKey));
+  let added = 0, dup = 0, bad = 0;
+  const notes = [];
+  for (const f of files) {
+    let res;
+    try { res = csvToEntries(parseCsv(await readText(f))); }
+    catch (err) { notes.push(f.name + ": nicht lesbar"); continue; }
+    if (res.error) { notes.push(f.name + ": " + res.error); continue; }
+    res.entries.forEach(e => {
+      const k = entryKey(e);
+      if (seen.has(k)) { dup++; return; }
+      seen.add(k); arr.push(e); added++;
+    });
+    bad += res.bad.length;
+    res.bad.slice(0, 3).forEach(b => notes.push(f.name + ", " + b));
+    if (res.bad.length > 3) notes.push(f.name + ": … und " + (res.bad.length - 3) + " weitere");
+  }
+  let text = "Import: " + added + " neu, " + dup + " schon vorhanden, " + bad + " übersprungen.";
+  if (notes.length) text += "\n" + notes.join("\n");
+  if (added > 0) {
+    if (!store(arr)) { msg.textContent = "Speichern im Browser nicht möglich. Es wurde nichts importiert."; return; }
+    endEdit();
+    render();
+    sync();
+  }
+  msg.style.whiteSpace = "pre-line";
+  msg.textContent = text;
+}
+
+$("imp").onclick = () => { $("impfile").click(); };
+$("impfile").onchange = async () => {
+  await importFiles(Array.from($("impfile").files || []));
+  $("impfile").value = "";
 };
 
 $("dl").onclick = () => {
