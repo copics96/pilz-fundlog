@@ -37,6 +37,10 @@
   .entry small { color:var(--muted); display:block; }
   h2 { font-size:1.05rem; margin:24px 0 4px; }
   .info { white-space:pre-line; font-size:.9rem; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; margin-top:8px; }
+  summary { cursor:pointer; padding:10px 0; }
+  summary.h2 { font-size:1.05rem; font-weight:700; margin-top:24px; }
+  details.day { border-top:1px solid var(--line); }
+  details.day > summary { font-weight:600; }
   textarea.out { height:90px; font-family:monospace; font-size:.8rem; display:none; margin-top:8px; }
 </style>
 </head>
@@ -89,8 +93,10 @@
 <button class="sec" id="cancel" type="button" style="display:none">Bearbeiten abbrechen</button>
 <div class="msg" id="msg"></div>
 
-<h2>Einträge (<span id="count">0</span>)</h2>
+<details id="listbox">
+<summary class="h2">Einträge (<span id="count">0</span>)</summary>
 <div id="list"></div>
+</details>
 
 <button class="sec" id="dl" type="button">CSV herunterladen</button>
 <button class="sec" id="copy" type="button">CSV kopieren</button>
@@ -161,36 +167,65 @@ function endEdit() {
   $("cancel").style.display = "none";
 }
 
+const openDays = new Set();   // aufgeklappte Tage bleiben beim Neuzeichnen offen
+
 function render() {
   const arr = load();
   $("count").textContent = arr.length;
-  $("list").innerHTML = "";
-  arr.slice().reverse().forEach((e, i) => {
-    const idx = arr.length - 1 - i;
-    const div = document.createElement("div");
-    div.className = "entry";
-    const info = document.createElement("div");
-    const art = $("art").querySelector('option[value="' + e.art + '"]');
-    info.textContent = e.datum + " – " + (art ? art.textContent : e.art) + " – " + (e.fund === "ja" ? "Fund" : "kein Fund");
-    const sm = document.createElement("small");
-    sm.textContent = e.lat + ", " + e.lon + (e.menge ? " · " + e.menge : "") + (e.notiz ? " · " + e.notiz : "");
-    info.appendChild(sm);
-    const be = document.createElement("button");
-    be.className = "small edit"; be.textContent = "Bearbeiten";
-    be.onclick = () => startEdit(idx);
-    const b = document.createElement("button");
-    b.className = "small"; b.textContent = "Löschen";
-    b.onclick = () => {
-      if (confirm("Eintrag löschen?")) { endEdit(); const a = load(); a.splice(idx, 1); store(a); render(); }
-    };
-    const btns = document.createElement("div");
-    btns.className = "btns";
-    btns.appendChild(be); btns.appendChild(b);
-    div.appendChild(info); div.appendChild(btns);
-    $("list").appendChild(div);
+  const list = $("list");
+  list.innerHTML = "";
+  const groups = new Map();
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const day = arr[i].datum;
+    if (!groups.has(day)) groups.set(day, []);
+    groups.get(day).push(i);
+  }
+  Array.from(groups.keys()).sort().reverse().forEach(day => {
+    const idxs = groups.get(day);
+    const det = document.createElement("details");
+    det.className = "day";
+    if (openDays.has(day)) det.open = true;
+    det.addEventListener("toggle", () => { if (det.open) openDays.add(day); else openDays.delete(day); });
+    const sum = document.createElement("summary");
+    const finds = idxs.filter(k => arr[k].fund === "ja").length;
+    sum.textContent = day + " · " + idxs.length + (idxs.length === 1 ? " Eintrag" : " Einträge") +
+      " (" + finds + (finds === 1 ? " Fund" : " Funde") + ")";
+    det.appendChild(sum);
+    idxs.forEach(idx => {
+      const e = arr[idx];
+      const div = document.createElement("div");
+      div.className = "entry";
+      div.dataset.idx = idx;
+      const info = document.createElement("div");
+      const art = $("art").querySelector('option[value="' + e.art + '"]');
+      info.textContent = (art ? art.textContent : e.art) + " – " + (e.fund === "ja" ? "Fund" : "kein Fund");
+      const sm = document.createElement("small");
+      sm.textContent = e.lat + ", " + e.lon + (e.menge ? " · " + e.menge : "") + (e.notiz ? " · " + e.notiz : "");
+      info.appendChild(sm);
+      const be = document.createElement("button");
+      be.className = "small edit"; be.textContent = "Bearbeiten";
+      be.onclick = () => startEdit(idx);
+      const b = document.createElement("button");
+      b.className = "small"; b.textContent = "Löschen";
+      b.onclick = () => {
+        if (confirm("Eintrag löschen?")) { endEdit(); const a = load(); a.splice(idx, 1); store(a); render(); }
+      };
+      const btns = document.createElement("div");
+      btns.className = "btns";
+      btns.appendChild(be); btns.appendChild(b);
+      div.appendChild(info); div.appendChild(btns);
+      det.appendChild(div);
+    });
+    list.appendChild(det);
   });
   renderLearn();
 }
+
+// Zustand der ganzen Liste (auf/zu) merken
+try { $("listbox").open = localStorage.getItem("pilz_list_open") === "1"; } catch (e) {}
+$("listbox").addEventListener("toggle", () => {
+  try { localStorage.setItem("pilz_list_open", $("listbox").open ? "1" : "0"); } catch (e) {}
+});
 
 $("datum").value = today();
 
