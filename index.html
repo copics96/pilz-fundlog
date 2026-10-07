@@ -36,6 +36,7 @@
   .entry { border-top:1px solid var(--line); padding:10px 0; display:flex; justify-content:space-between; gap:8px; align-items:flex-start; }
   .entry small { color:var(--muted); display:block; }
   h2 { font-size:1.05rem; margin:24px 0 4px; }
+  .info { white-space:pre-line; font-size:.9rem; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:10px; margin-top:8px; }
   textarea.out { height:90px; font-family:monospace; font-size:.8rem; display:none; margin-top:8px; }
 </style>
 </head>
@@ -96,6 +97,16 @@
 <textarea class="out" id="out" readonly></textarea>
 <div class="msg">Die Einträge liegen nur in diesem Browser auf diesem Handy. Lade die CSV regelmäßig herunter, sonst gehen sie bei gelöschten Browserdaten verloren.</div>
 
+<h2>Lernstand</h2>
+<div class="info" id="learn">Noch keine Daten.</div>
+<button class="sec" id="syncbtn" type="button">Wetter laden und Lernstand aktualisieren</button>
+<button class="sec" id="dlj" type="button" style="display:none">gelernt.json herunterladen</button>
+
+<h2>Prognose</h2>
+<button class="sec" id="prog" type="button">Prognose für diesen Standort</button>
+<div class="info" id="progout" style="display:none"></div>
+
+<script src="engine.js"></script>
 <script>
 const KEY = "pilz_eintraege_v1";
 const $ = id => document.getElementById(id);
@@ -175,6 +186,7 @@ function render() {
     div.appendChild(info); div.appendChild(btns);
     $("list").appendChild(div);
   });
+  renderLearn();
 }
 
 $("datum").value = today();
@@ -214,12 +226,17 @@ $("save").onclick = () => {
   };
   const arr = load();
   const wasEdit = editIdx !== null && editIdx < arr.length;
-  if (wasEdit) arr[editIdx] = e; else arr.push(e);
+  if (wasEdit) {
+    const old = arr[editIdx];
+    if (old.wx && old.datum === e.datum && old.lat === e.lat && old.lon === e.lon) { e.wx = old.wx; e.wxFinal = old.wxFinal; }
+    arr[editIdx] = e;
+  } else arr.push(e);
   if (store(arr)) {
     $("msg").textContent = wasEdit ? "Änderung gespeichert." : "Gespeichert.";
     $("menge").value = ""; $("notiz").value = "";
     endEdit();
     render();
+    sync();
   } else {
     $("msg").textContent = "Speichern im Browser nicht möglich. Bitte CSV kopieren und woanders sichern.";
   }
@@ -247,6 +264,119 @@ $("copy").onclick = () => {
   try { document.execCommand("copy"); } catch (e) {}
 };
 
+// ---------- Wetter automatisch laden und lernen ----------
+let syncing = false;
+let lastLearn = null;
+const CRIT_NAMES = { rain_window: "Regen", soil_temp: "Bodentemp.", night_min: "Nachtminimum", humidity: "Luftfeuchte", frost: "Frost" };
+
+function needsWx(e, t) {
+  if (e.datum > t) return false;
+  return !e.wx || (!e.wxFinal && daysBetween(e.datum, t) > 7);
+}
+
+async function sync() {
+  if (syncing || typeof fetchHistoryWx !== "function") return;
+  syncing = true;
+  try {
+    const t = today();
+    const need = [];
+    load().forEach((e, i) => { if (needsWx(e, t)) need.push(i); });
+    if (need.length && navigator.onLine !== false) {
+      let done = 0;
+      for (const i of need) {
+        $("learn").textContent = "Lade Wetter " + (done + 1) + "/" + need.length + " …";
+        try {
+          const e = load()[i];
+          if (!e || !needsWx(e, t)) continue;
+          const res = await fetchHistoryWx(num(e.lat), num(e.lon), e.datum, t);
+          const arr = load();
+          const cur = arr[i];
+          if (cur && cur.datum === e.datum && cur.lat === e.lat && cur.lon === e.lon) {
+            cur.wx = res.wx; cur.wxFinal = res.final; store(arr);
+          }
+          done++;
+        } catch (err) { break; }   // offline oder Fehler: beim naechsten Mal wieder versuchen
+      }
+    }
+  } finally {
+    syncing = false;
+    renderLearn();
+  }
+}
+
+function renderLearn() {
+  const box = $("learn");
+  if (typeof learn !== "function") { box.textContent = "engine.js fehlt. Bitte die Datei mit ins Repo hochladen."; return; }
+  if (syncing) return;
+  const t = today();
+  const arr = load();
+  const pending = arr.filter(e => needsWx(e, t)).length;
+  const res = learn(arr.filter(e => e.wx));
+  lastLearn = res;
+  const lines = [];
+  lines.push("Einträge: " + arr.length + (pending ? " · Wetter ausstehend: " + pending + " (wird mit Internet geladen)" : " · Wetter geladen"));
+  lines.push("Tage/Orte: " + res.n + " (Fund-Tage " + res.nFind + ", ohne Fund " + res.nNo + ")");
+  if (!res.ok) {
+    lines.push(res.reason === "aehnlich"
+      ? "Die Wetterwerte der Tage sind zu ähnlich, daraus lässt sich noch nichts lernen. Startwerte gelten."
+      : "Noch zu wenig Daten zum Lernen (mind. " + MIN_EACH + " Fund-Tage und " + MIN_EACH + " Tage ohne Fund). Startwerte gelten.");
+  } else {
+    lines.push("Lernanteil: " + Math.round(res.share * 100) + " % (Start → neu)");
+    CRIT.forEach(k => {
+      lines.push(CRIT_NAMES[k] + ": " + START_WEIGHTS[k].toFixed(2) + " → " + res.weights[k].toFixed(2));
+    });
+    if (res.auc0 != null) lines.push("Trennschärfe der Startwerte (AUC, 0,5 = Zufall): " + res.auc0.toFixed(2));
+  }
+  box.textContent = lines.join("\n");
+  $("dlj").style.display = res.ok ? "block" : "none";
+}
+
+$("syncbtn").onclick = () => { sync(); };
+window.addEventListener("online", () => { sync(); });
+
+$("dlj").onclick = () => {
+  if (!lastLearn || !lastLearn.ok) return;
+  const w = {};
+  CRIT.forEach(k => { w[k] = Math.round(lastLearn.weights[k] * 10000) / 10000; });
+  const obj = { stand: today(), tage: lastLearn.n, fund_tage: lastLearn.nFind, ohne_fund_tage: lastLearn.nNo,
+                lernanteil: Math.round(lastLearn.share * 100) / 100, weights: w };
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "gelernt.json";
+  document.body.appendChild(a); a.click(); a.remove();
+};
+
+$("prog").onclick = async () => {
+  const out = $("progout");
+  const lat = num($("lat").value), lon = num($("lon").value);
+  out.style.display = "block";
+  if (lat === null || lon === null) { out.textContent = "Bitte oben einen Standort angeben (Breite und Länge)."; return; }
+  if (typeof fetchForecastWx !== "function") { out.textContent = "engine.js fehlt."; return; }
+  out.textContent = "Lade Wetter …";
+  try {
+    const wx = await fetchForecastWx(lat, lon);
+    const t = today();
+    const idx = wx.time.indexOf(t);
+    const sum = (a, b) => wx.precip.slice(a, b).reduce((s, v) => s + (v || 0), 0);
+    const learned = lastLearn && lastLearn.ok;
+    const weights = learned ? lastLearn.weights : START_WEIGHTS;
+    const res = Object.keys(SPECIES).map(k => evaluate(wx, k, t, weights)).filter(Boolean).sort((a, b) => b.score - a.score);
+    const lines = [
+      "Regen letzte 7 Tage: " + sum(Math.max(0, idx - 6), idx + 1).toFixed(0) + " mm · nächste 3 Tage: " + sum(idx + 1, idx + 4).toFixed(0) + " mm",
+      learned ? "Gewichte: gelernt (Lernanteil " + Math.round(lastLearn.share * 100) + " %)" : "Gewichte: Startwerte",
+      ""
+    ];
+    res.forEach(r => {
+      const opt = $("art").querySelector('option[value="' + r.key + '"]');
+      lines.push(r.score + " · " + scoreLabel(r.score) + " · " + (opt ? opt.textContent : r.key) + (r.inSeason ? "" : " (außerhalb der Saison)"));
+    });
+    out.textContent = lines.join("\n");
+  } catch (err) {
+    out.textContent = "Wetter konnte nicht geladen werden (offline?). Bitte mit Internet erneut versuchen.";
+  }
+};
+
 // Offline-Zwischenspeicher und Schutz vor automatischem Loeschen (nur ueber https)
 try {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
@@ -254,6 +384,7 @@ try {
 } catch (e) {}
 
 render();
+sync();
 </script>
 </body>
 </html>
